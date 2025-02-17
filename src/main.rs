@@ -1,59 +1,113 @@
-// disable console on windows for release builds
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! A shader that uses dynamic data like the time since startup.
+//! The time data is in the globals binding which is part of the `mesh_view_bindings` shader import.
 
-use bevy::asset::AssetMetaCheck;
-use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
-use bevy::winit::WinitWindows;
-use bevy::DefaultPlugins;
-use bevy_game::GamePlugin; // ToDo: Replace bevy_game with your new crate name.
-use std::io::Cursor;
-use winit::window::Icon;
+mod func_gen;
+
+use bevy::{
+    dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin},
+    prelude::*,
+    render::render_resource::{AsBindGroup, ShaderRef},
+};
+use func_gen::generate_tree;
+use rand::SeedableRng;
+const MAX_DEPTH: u32 = 20;
+
+/// This example uses a shader source file from the assets subdirectory
+pub const MESH2D_SHADER_HANDLE: Handle<Shader> = Handle::weak_from_u128(69420);
 
 fn main() {
     App::new()
-        .insert_resource(ClearColor(Color::linear_rgb(0.4, 0.4, 0.4)))
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Bevy game".to_string(), // ToDo
-                        // Bind to canvas included in `index.html`
-                        canvas: Some("#bevy".to_owned()),
-                        fit_canvas_to_parent: true,
-                        // Tells wasm not to override default event handling, like F5 and Ctrl+R
-                        prevent_default_event_handling: false,
-                        ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    meta_check: AssetMetaCheck::Never,
-                    ..default()
-                }),
-        )
-        .add_plugins(GamePlugin)
-        .add_systems(Startup, set_window_icon)
+        .insert_resource(Seed(rand::random()))
+        .add_plugins((
+            DefaultPlugins,
+            FpsOverlayPlugin {
+                config: FpsOverlayConfig::default(),
+            },
+            MaterialPlugin::<CustomMaterial>::default(),
+        ))
+        .add_systems(Startup, setup)
         .run();
 }
 
-// Sets the icon on windows and X11
-fn set_window_icon(
-    windows: NonSend<WinitWindows>,
-    primary_window: Query<Entity, With<PrimaryWindow>>,
+#[derive(Resource)]
+struct Seed(pub u64);
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut shaders: ResMut<Assets<Shader>>,
+    mut materials: ResMut<Assets<CustomMaterial>>,
+    seed: ResMut<Seed>,
 ) {
-    let primary_entity = primary_window.single();
-    let Some(primary) = windows.get_window(primary_entity) else {
-        return;
-    };
-    let icon_buf = Cursor::new(include_bytes!(
-        "../build/macos/AppIcon.iconset/icon_256x256.png"
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed.0);
+    let cases: String = (0..100)
+        .map(|i| {
+            let r_tree = generate_tree(MAX_DEPTH, &mut rng);
+            // info!("{:?}", r_tree);
+            let g_tree = generate_tree(MAX_DEPTH, &mut rng);
+            // info!("{:?}", g_tree);
+            let b_tree = generate_tree(MAX_DEPTH, &mut rng);
+            // info!("{:?}", b_tree);
+            format!(
+                "case {}u: {{return vec4f(({}), ({}), ({}), 1.0);}}\n",
+                i, r_tree, g_tree, b_tree
+            )
+        })
+        .collect();
+
+    let shader_text = format!(
+        "
+            #import bevy_pbr::{{
+                mesh_view_bindings::globals,
+                forward_io::VertexOutput,
+            }}
+           @group(2) @binding(0) var<uniform> id: u32;
+
+           @fragment
+           fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {{
+            switch id{{
+                {cases}
+                default: {{return vec4f(0.5, 0.0, 0.5, 1);}}
+                }}
+           }}
+           ",
+    );
+
+    print!("{shader_text}");
+
+    shaders.insert(
+        &MESH2D_SHADER_HANDLE,
+        Shader::from_wgsl(shader_text, file!()),
+    );
+
+    // cube
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::default())),
+        MeshMaterial3d(materials.add(CustomMaterial { id: 1 })),
+        Transform::from_xyz(0.0, 0.5, 0.0),
     ));
-    if let Ok(image) = image::load(icon_buf, image::ImageFormat::Png) {
-        let image = image.into_rgba8();
-        let (width, height) = image.dimensions();
-        let rgba = image.into_raw();
-        let icon = Icon::from_rgba(rgba, width, height).unwrap();
-        primary.set_window_icon(Some(icon));
-    };
+
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::default())),
+        MeshMaterial3d(materials.add(CustomMaterial { id: 2 })),
+        Transform::from_xyz(2.0, 0.5, 0.0),
+    ));
+
+    // camera
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+struct CustomMaterial {
+    #[uniform(0)]
+    id: u32,
+}
+
+impl Material for CustomMaterial {
+    fn fragment_shader() -> ShaderRef {
+        MESH2D_SHADER_HANDLE.into()
+    }
 }

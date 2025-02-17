@@ -2,6 +2,7 @@
 
 mod actions;
 mod audio;
+mod func_gen;
 mod loading;
 mod menu;
 mod player;
